@@ -1,4 +1,3 @@
-import * as AWS from 'aws-sdk'
 import {
   Client,
   Command,
@@ -6,11 +5,8 @@ import {
   Cookie,
   CookieQuery,
   PdfOptions,
+  ScreenshotOptions,
 } from '../types'
-import * as cuid from 'cuid'
-import * as fs from 'fs'
-import * as os from 'os'
-import * as path from 'path'
 import {
   nodeExists,
   wait,
@@ -38,6 +34,9 @@ import {
   focus,
   clearInput,
   setFileInput,
+  writeToFile,
+  isS3Configured,
+  uploadToS3,
 } from '../util'
 
 export default class LocalRuntime {
@@ -57,10 +56,10 @@ export default class LocalRuntime {
       case 'setViewport':
         return setViewport(this.client, command.options)
       case 'wait': {
-        if (command.timeout) {
+        if (command.selector) {
+          return this.waitSelector(command.selector, command.timeout)
+        } else if (command.timeout) {
           return this.waitTimeout(command.timeout)
-        } else if (command.selector) {
-          return this.waitSelector(command.selector)
         } else {
           throw new Error('waitFn not yet implemented')
         }
@@ -76,7 +75,7 @@ export default class LocalRuntime {
       case 'returnExists':
         return this.returnExists(command.selector)
       case 'returnScreenshot':
-        return this.returnScreenshot()
+        return this.returnScreenshot(command.selector, command.options)
       case 'returnHtml':
         return this.returnHtml()
       case 'returnPdf':
@@ -106,7 +105,7 @@ export default class LocalRuntime {
       case 'mousedown':
         return this.mousedown(command.selector)
       case 'mouseup':
-        return this.mousup(command.selector)
+        return this.mouseup(command.selector)
       case 'focus':
         return this.focus(command.selector)
       case 'clearInput':
@@ -149,9 +148,12 @@ export default class LocalRuntime {
     await wait(timeout)
   }
 
-  private async waitSelector(selector: string): Promise<void> {
-    this.log(`Waiting for ${selector}`)
-    await waitForNode(this.client, selector, this.chromelessOptions.waitTimeout)
+  private async waitSelector(
+    selector: string,
+    waitTimeout: number = this.chromelessOptions.waitTimeout
+  ): Promise<void> {
+    this.log(`Waiting for ${selector} ${waitTimeout}`)
+    await waitForNode(this.client, selector, waitTimeout)
     this.log(`Waited for ${selector}`)
   }
 
@@ -220,7 +222,7 @@ export default class LocalRuntime {
     this.log(`Mousedown on ${selector}`)
   }
 
-  private async mousup(selector: string): Promise<void> {
+  private async mouseup(selector: string): Promise<void> {
     if (this.chromelessOptions.implicitWait) {
       this.log(`mouseup(): Waiting for ${selector}`)
       await waitForNode(
@@ -356,33 +358,34 @@ export default class LocalRuntime {
   }
 
   // Returns the S3 url or local file path
-  async returnScreenshot(): Promise<string> {
-    const data = await screenshot(this.client)
+  async returnScreenshot(
+    selector?: string,
+    options?: ScreenshotOptions,
+  ): Promise<string> {
+    if (selector) {
+      if (this.chromelessOptions.implicitWait) {
+        this.log(`screenshot(): Waiting for ${selector}`)
+        await waitForNode(
+          this.client,
+          selector,
+          this.chromelessOptions.waitTimeout,
+        )
+      }
 
-    // check if S3 configured
-    if (
-      process.env['CHROMELESS_S3_BUCKET_NAME'] &&
-      process.env['CHROMELESS_S3_BUCKET_URL']
-    ) {
-      const s3Path = `${cuid()}.png`
-      const s3 = new AWS.S3()
-      await s3
-        .putObject({
-          Bucket: process.env['CHROMELESS_S3_BUCKET_NAME'],
-          Key: s3Path,
-          ContentType: 'image/png',
-          ACL: 'public-read',
-          Body: new Buffer(data, 'base64'),
-        })
-        .promise()
+      const exists = await nodeExists(this.client, selector)
+      if (!exists) {
+        throw new Error(
+          `screenshot(): node for selector ${selector} doesn't exist`,
+        )
+      }
+    }
 
-      return `https://${process.env['CHROMELESS_S3_BUCKET_URL']}/${s3Path}`
+    const data = await screenshot(this.client, selector)
+
+    if (isS3Configured()) {
+      return await uploadToS3(data, 'image/png')
     } else {
-      // write to `${os.tmpdir()}` instead
-      const filePath = path.join(os.tmpdir(), `${cuid()}.png`)
-      fs.writeFileSync(filePath, Buffer.from(data, 'base64'))
-
-      return filePath
+      return writeToFile(data, 'png', options && options.filePath)
     }
   }
 
@@ -392,32 +395,16 @@ export default class LocalRuntime {
 
   // Returns the S3 url or local file path
   async returnPdf(options?: PdfOptions): Promise<string> {
-    const data = await pdf(this.client, options)
+    const {
+      filePath,
+      ...cdpOptions
+    } = options || { filePath: undefined }
+    const data = await pdf(this.client, cdpOptions)
 
-    // check if S3 configured
-    if (
-      process.env['CHROMELESS_S3_BUCKET_NAME'] &&
-      process.env['CHROMELESS_S3_BUCKET_URL']
-    ) {
-      const s3Path = `${cuid()}.pdf`
-      const s3 = new AWS.S3()
-      await s3
-        .putObject({
-          Bucket: process.env['CHROMELESS_S3_BUCKET_NAME'],
-          Key: s3Path,
-          ContentType: 'application/pdf',
-          ACL: 'public-read',
-          Body: new Buffer(data, 'base64'),
-        })
-        .promise()
-
-      return `https://${process.env['CHROMELESS_S3_BUCKET_URL']}/${s3Path}`
+    if (isS3Configured()) {
+      return await uploadToS3(data, 'application/pdf')
     } else {
-      // write to `${os.tmpdir()}` instead
-      const filePath = path.join(os.tmpdir(), `${cuid()}.pdf`)
-      fs.writeFileSync(filePath, Buffer.from(data, 'base64'))
-
-      return filePath
+      return writeToFile(data, 'pdf', filePath)
     }
   }
 

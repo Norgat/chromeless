@@ -41,7 +41,10 @@ export default class LocalChrome implements Chrome {
       chromeFlags: this.options.chromeFlags,
       chromePath: this.options.chromePath,
     })
-    return await CDP({ port: this.chromeInstance.port })
+    const target = await CDP.New({
+      port: this.chromeInstance.port,
+    })
+    return await CDP({ target })
   }
 
   private async connectToChrome(): Promise<Client> {
@@ -101,7 +104,7 @@ export default class LocalChrome implements Chrome {
     const { client } = await this.runtimeClientPromise
 
     if (this.options.cdp.closeTab) {
-      CDP.Close({ id: client.target.id })
+      await CDP.Close({ id: client.target.id })
     }
 
     if (this.chromeInstance) {
